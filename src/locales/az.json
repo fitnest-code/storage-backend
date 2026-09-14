@@ -7,6 +7,8 @@
     "error.access_denied": "Bu əməliyyat üçün icazəniz yoxdur.",
     "error.bad_request": "Yanlış sorğu göndərildi.",
     "error.no_file_uploaded": "Fayl təqdim edilməyib.",
+    "error.file_too_large": "Faylın həcmi 20MB limitini keçir.",
+    "error.invalid_file_type": "Yalnız şəkil fayllarına icazə verilir.",
     "error.upload_failed": "Fayl yüklənməsi mümkün olmadı.",
     "error.fetch_failed": "Məlumatların əldə edilməsi mümkün olmadı.",
     "error.delete_failed": "Silinmə əməliyyatı mümkün olmadı.",

@@ -3,6 +3,7 @@ package grpc
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -73,6 +74,9 @@ func (s *Server) UploadFile(stream pb.StorageService_UploadFileServer) error {
 	ctx := stream.Context()
 	result, err := s.svc.UploadFile(ctx, tempFile, dir, meta.GetOldPath())
 	if err != nil {
+		if errors.Is(err, storage.ErrFileTooLarge) || errors.Is(err, storage.ErrInvalidType) {
+			return status.Error(codes.InvalidArgument, err.Error())
+		}
 		return status.Errorf(codes.Internal, "upload failed: %v", err)
 	}
 

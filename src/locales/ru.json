@@ -7,6 +7,8 @@
     "error.access_denied": "У вас нет прав для выполнения этой операции.",
     "error.bad_request": "Неверный запрос.",
     "error.no_file_uploaded": "Файл не был предоставлен.",
+    "error.file_too_large": "Размер файла превышает лимит 20 МБ.",
+    "error.invalid_file_type": "Разрешены только изображения.",
     "error.upload_failed": "Не удалось загрузить файл.",
     "error.fetch_failed": "Не удалось получить запрошенные данные.",
     "error.delete_failed": "Не удалось выполнить удаление.",

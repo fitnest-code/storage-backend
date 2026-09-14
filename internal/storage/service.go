@@ -324,19 +324,21 @@ func (s *StorageService) EnsureFileCached(ctx context.Context, fileID string) (l
 
 // UploadFile handles file upload directly to Azure Blob and stores metadata
 func (s *StorageService) UploadFile(ctx context.Context, localFilePath, directory, oldPath string) (*UploadResult, error) {
-	fi, err := os.Stat(localFilePath)
+	uploadPath, fileName, fileSize, compressed, err := PrepareImage(localFilePath)
 	if err != nil {
-		return nil, fmt.Errorf("cannot stat upload file: %w", err)
+		return nil, err
+	}
+	if compressed && uploadPath != localFilePath {
+		defer os.Remove(uploadPath)
 	}
 
-	fileName := filepath.Base(localFilePath)
 	tempNodeID := fmt.Sprintf("temp_%d_%s", time.Now().UnixNano(), fileName)
 	tempFsID := HashNodeID(tempNodeID)
 	blobName := strconv.FormatInt(tempFsID, 10)
 
 	// Save to local cache
 	targetLocalPath := filepath.Join(s.storageDir, blobName)
-	if err := copyFile(localFilePath, targetLocalPath); err != nil {
+	if err := copyFile(uploadPath, targetLocalPath); err != nil {
 		return nil, fmt.Errorf("failed to cache local upload: %w", err)
 	}
 
@@ -370,7 +372,7 @@ func (s *StorageService) UploadFile(ctx context.Context, localFilePath, director
 	meta := &FileMetadata{
 		FileName:  fileName,
 		Directory: directory,
-		Size:      fi.Size(),
+		Size:      fileSize,
 		Status:    "uploaded",
 		Timestamp: time.Now().UnixMilli(),
 	}
@@ -387,7 +389,7 @@ func (s *StorageService) UploadFile(ctx context.Context, localFilePath, director
 		Message: "File uploaded successfully",
 	}
 	res.FileDetails.Name = fileName
-	res.FileDetails.Size = fi.Size()
+	res.FileDetails.Size = fileSize
 	res.FileDetails.Path = filepath.Join(directory, fileName)
 	res.FileDetails.NodeID = tempNodeID
 	res.FileDetails.FsID = tempFsID

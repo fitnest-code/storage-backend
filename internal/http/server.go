@@ -2,6 +2,7 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -141,6 +142,14 @@ func (s *HTTPServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 	result, err := s.svc.UploadFile(ctx, tempFilePath, finalDirectory, "")
 	if err != nil {
 		fmt.Printf("[HTTPServer] Upload error: %v\n", err)
+		if errors.Is(err, storage.ErrFileTooLarge) {
+			response.Error(w, http.StatusBadRequest, "FILE_TOO_LARGE", "error.file_too_large", path, lang, nil)
+			return
+		}
+		if errors.Is(err, storage.ErrInvalidType) {
+			response.Error(w, http.StatusBadRequest, "INVALID_FILE_TYPE", "error.invalid_file_type", path, lang, nil)
+			return
+		}
 		response.Error(w, http.StatusInternalServerError, "UPLOAD_FAILED", "error.upload_failed", path, lang, nil)
 		return
 	}

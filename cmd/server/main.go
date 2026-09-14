@@ -110,8 +110,8 @@ func main() {
 	httpSrv := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.HTTPPort),
 		Handler:      httpHandler,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 60 * time.Second,
+		ReadTimeout:  120 * time.Second,
+		WriteTimeout: 120 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
