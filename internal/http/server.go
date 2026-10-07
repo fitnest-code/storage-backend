@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -75,7 +76,17 @@ func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	localPath, filename, _, err := s.svc.EnsureFileCached(ctx, fileID)
 	if err != nil {
 		fmt.Printf("[HTTPServer] Stream failed for fileId '%s' (url: %s): %v\n", fileID, path, err)
-		response.Error(w, http.StatusNotFound, "FILE_NOT_FOUND", "error.file_not_found", path, lang, nil)
+		if errors.Is(err, context.Canceled) {
+			// Client disconnected mid-request; nothing meaningful to answer.
+			return
+		}
+		if errors.Is(err, storage.ErrFileNotFound) {
+			response.Error(w, http.StatusNotFound, "FILE_NOT_FOUND", "error.file_not_found", path, lang, nil)
+			return
+		}
+		// Transient storage/Azure failure: 502 tells clients (and us, via logs)
+		// to retry instead of caching a permanent "missing image".
+		response.Error(w, http.StatusBadGateway, "STORAGE_UNAVAILABLE", "error.internal_server_error", path, lang, nil)
 		return
 	}
 
@@ -96,8 +107,9 @@ func (s *HTTPServer) handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 100MB max memory/temp parsing limit
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	// Buffer at most 8MB in RAM; larger parts spill to temp files (the old
+	// 100MB-in-RAM setting was OOMKilling the 384Mi pod on big uploads).
+	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		response.Error(w, http.StatusBadRequest, "BAD_REQUEST", "error.bad_request", path, lang, nil)
 		return
 	}

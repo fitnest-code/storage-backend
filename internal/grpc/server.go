@@ -119,7 +119,12 @@ func (s *Server) DownloadFile(req *pb.DownloadFileRequest, stream pb.StorageServ
 	ctx := stream.Context()
 	localPath, filename, contentType, err := s.svc.EnsureFileCached(ctx, fileID)
 	if err != nil {
-		return status.Errorf(codes.NotFound, "file not found: %v", err)
+		if errors.Is(err, storage.ErrFileNotFound) {
+			return status.Errorf(codes.NotFound, "file not found: %v", err)
+		}
+		// Transient storage failure — Unavailable tells callers to retry
+		// instead of treating the content as permanently missing.
+		return status.Errorf(codes.Unavailable, "storage unavailable: %v", err)
 	}
 
 	// Send metadata first

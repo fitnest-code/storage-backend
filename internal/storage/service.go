@@ -3,9 +3,11 @@ package storage
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
+	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/blob"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob/sas"
@@ -21,6 +24,52 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
+
+// ErrFileNotFound wraps genuine 404s (the blob really is absent from Azure).
+// Any other resolve/download failure must NOT be reported as this error, so
+// callers can distinguish "content is gone" from "storage had a transient hiccup"
+// and answer 404 vs 502 accordingly.
+var ErrFileNotFound = errors.New("file not found")
+
+// isBlobNotFound reports whether err is an authoritative Azure 404.
+func isBlobNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var respErr *azcore.ResponseError
+	if errors.As(err, &respErr) {
+		if respErr.StatusCode == http.StatusNotFound {
+			return true
+		}
+		return strings.EqualFold(respErr.ErrorCode, "BlobNotFound")
+	}
+	return false
+}
+
+// getPropertiesRetry checks blob existence, retrying transient Azure failures
+// (throttling, 5xx, network resets). A definitive 404 stops immediately.
+// Returns nil if the blob exists, ErrBlobNotFound-ish 404 error, or the last
+// transient error after exhausting attempts.
+func (s *StorageService) getPropertiesRetry(ctx context.Context, blobName string) error {
+	bc := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(blobName)
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err := bc.GetProperties(ctx, nil)
+		if err == nil {
+			return nil
+		}
+		if isBlobNotFound(err) {
+			return err
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(attempt+1) * 250 * time.Millisecond):
+		}
+	}
+	return lastErr
+}
 
 type FileMetadata struct {
 	RealNodeID string `json:"realNodeId,omitempty"`
@@ -199,23 +248,45 @@ func (s *StorageService) DeleteMetadata(ctx context.Context, id string) {
 func (s *StorageService) ResolveBlobName(ctx context.Context, fileID string) (blobName string, meta *FileMetadata, err error) {
 	id := s.ExtractIDFromURL(fileID)
 
-	// 1. Check if blob directly exists in Azure
-	_, err = s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(id).GetProperties(ctx, nil)
+	// 1. Check if blob directly exists in Azure (retries transient failures)
+	err = s.getPropertiesRetry(ctx, id)
 	if err == nil {
 		return id, s.GetMetadata(ctx, id), nil
 	}
+	if ctx.Err() != nil {
+		return id, nil, ctx.Err()
+	}
+	idNotFound := isBlobNotFound(err)
+	idErr := err
 
 	// 2. Check metadata for realNodeId mapping
 	m := s.GetMetadata(ctx, id)
 	if m != nil && m.RealNodeID != "" {
 		realHash := strconv.FormatInt(HashNodeID(m.RealNodeID), 10)
-		_, err = s.client.ServiceClient().NewContainerClient(s.containerName).NewBlobClient(realHash).GetProperties(ctx, nil)
-		if err == nil {
+		err2 := s.getPropertiesRetry(ctx, realHash)
+		if err2 == nil {
 			return realHash, m, nil
 		}
+		if ctx.Err() != nil {
+			return id, m, ctx.Err()
+		}
+		if !isBlobNotFound(err2) {
+			// Transient Azure failure while probing the remapped blob: surface the
+			// real error instead of masquerading it as a missing file.
+			fmt.Printf("[Storage] Azure lookup failed for %s (remapped from %s): %v\n", realHash, id, err2)
+			return id, m, fmt.Errorf("azure lookup failed for %s: %w", realHash, err2)
+		}
+		return id, m, fmt.Errorf("%w: %s", ErrFileNotFound, fileID)
 	}
 
-	return id, m, fmt.Errorf("file not found: %s", fileID)
+	if !idNotFound {
+		// Authoritative 404 on neither candidate is not established: the probe
+		// itself failed transiently, so report that (caller answers 502 + retry).
+		fmt.Printf("[Storage] Azure lookup failed for %s: %v\n", id, idErr)
+		return id, m, fmt.Errorf("azure lookup failed for %s: %w", id, idErr)
+	}
+
+	return id, m, fmt.Errorf("%w: %s", ErrFileNotFound, fileID)
 }
 
 // EnsureFileCached ensures the file is cached locally on SSD and returns the absolute local path
@@ -235,12 +306,32 @@ func (s *StorageService) EnsureFileCached(ctx context.Context, fileID string) (l
 			fName = meta.FileName
 		}
 
-		// Download from Azure to local SSD if not yet present
+		// Download from Azure to local SSD if not yet present (retry transient failures)
 		if _, statErr := os.Stat(targetLocalPath); os.IsNotExist(statErr) {
 			blobClient := s.client.ServiceClient().NewContainerClient(s.containerName).NewBlockBlobClient(blobName)
-			
-			resp, dlErr := blobClient.DownloadStream(ctx, nil)
+
+			var resp blob.DownloadStreamResponse
+			var dlErr error
+			for attempt := 0; attempt < 3; attempt++ {
+				resp, dlErr = blobClient.DownloadStream(ctx, nil)
+				if dlErr == nil {
+					break
+				}
+				if isBlobNotFound(dlErr) {
+					break
+				}
+				fmt.Printf("[Storage] download attempt %d failed for %s: %v\n", attempt+1, blobName, dlErr)
+				select {
+				case <-ctx.Done():
+					dlErr = ctx.Err()
+					attempt = 3
+				case <-time.After(time.Duration(attempt+1) * 300 * time.Millisecond):
+				}
+			}
 			if dlErr != nil {
+				if isBlobNotFound(dlErr) {
+					return nil, fmt.Errorf("%w: %s", ErrFileNotFound, fileID)
+				}
 				return nil, fmt.Errorf("failed to download blob %s: %w", blobName, dlErr)
 			}
 			defer resp.Body.Close()
